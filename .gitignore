@@ -1,0 +1,10 @@
+# Lua 编译缓存
+luac.out
+
+# 编辑器/系统
+.vscode/
+.idea/
+*.swp
+*~
+Thumbs.db
+desktop.ini
