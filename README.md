@@ -113,6 +113,7 @@ Nvim 多开 + Godot 多开的实例管理器，配合 [godotdev.nvim](https://gi
 | `:GodotDebugNext` / `:GodotDebugPrev` | 在 Godot 报错之间跳转 |
 | `:GodotDebugPath` | 显示日志文件路径 |
 | `:GodotDebugClear` | 清空面板和诊断（日志文件本身不动） |
+| `:GodotBridge` | 编辑器报错桥状态（项目 / addon / 注入结果 / 已收条数） |
 | `:checkhealth godot-instance` | 完整体检 |
 
 自动绑定：从 Godot 项目根目录启动 Nvim 时会自动激活该项目（`BufEnter` / `VimEnter`）。
@@ -201,6 +202,48 @@ godot-instance 复用它时不会改它的 console），那么编辑器 F5 起�
 它只压掉 `print`（连日志文件里也没了），`push_error` / `SCRIPT ERROR` 照样
 走 stderr。
 
+### 编辑器报错桥（编辑器侧的报错）
+
+上面那条 tail 日志的路，**看不到编辑器里编辑时的报错** —— 最典型的就是
+gdshader 编译失败：它只进 Godot 的 Output 面板，不写进 `user://logs/godot.log`
+（那个文件是游戏进程写的）。你贴的那种 `...gdshader#L1:C1-L1:C2147483647`
+链接就是编辑器侧的报错。
+
+这条路由**注入到项目里的 EditorPlugin** 补上：
+
+- 插件把 `godot_addon/nvim_debug_bridge/` 写进 `<项目>/addons/nvim_debug_bridge/`
+- 幂等地把 `res://addons/nvim_debug_bridge/plugin.cfg` 加进 `project.godot`
+  的 `[editor_plugins] enabled`
+- 插件用 **`OS.add_logger()`** 挂一个 `Logger`，把编辑器里的报错按 JSON 一行
+  写进 `user://nvim_debug_bridge.log`，Nvim 这边 tail 它并转成诊断
+
+用 `OS.add_logger` 而不是事后解析文本，是因为 `Logger._log_error` 直接给出
+**精确的** `file` / `line` / `code` / `error_type`（含 `ERROR_TYPE_SHADER`），
+不需要靠报错行文本去反查文件。实测：
+
+```
+{"type":3,"file":"res://broken.gdshader","line":4,
+ "code":"Unknown identifier in expression: 'undeclared_thing'."}
+```
+
+→ Nvim 里就是 `broken.gdshader:4` 的诊断，`source = "godot-editor"`。
+引擎自身的位置（`servers/...`、`modules/...`、`./...`）会跳过。
+
+**两个机制是互补的，不是替代**：桥抓编辑器侧，日志 tail 抓游戏运行时
+（游戏是另一个进程，编辑器插件看不到它）。
+
+几个要注意的：
+
+- **Godot 只在启动时加载编辑器插件**，所以第一次注入后要**重启一次编辑器**
+  （或在 Godot 里「项目 → 重新加载当前项目」）。
+- 注入会**改 `project.godot`**（会出现在 git diff 里）。不想要就把
+  `bridge.auto_enable = false`，然后自己去「项目设置 → 插件」勾一次。
+- addon 文件内容一致就复用；内容不同**但不是我们注入的**（没有
+  `managed-by: godot-instance.nvim` 标记）就绝不覆盖，只提示。
+- `:GodotBridge` 看当前状态（项目 / addon 路径 / 注入结果 / 桥日志 / 已收条数）。
+- 同一个 `(类型, 文件, 行, 消息)` 只发一次诊断 —— shader 会反复重编译，
+  不去重会把诊断刷爆。
+
 ## 配置
 
 ```lua
@@ -250,6 +293,17 @@ require("godot-instance").setup({
         -- 插件默认不占键位，要快捷键就显式给
         keymap = false,         -- 开关面板
         keymap_errors = false,  -- 报错列表（Trouble 优先，quickfix 兜底）
+    },
+
+    ------------------------------------------------------------
+    -- 编辑器报错桥（编辑器侧的报错，含 gdshader）
+    ------------------------------------------------------------
+    bridge = {
+        enabled = true,
+        inject = true,       -- 把 addon 写进 <项目>/addons/nvim_debug_bridge/
+        auto_enable = true,  -- 自动改 project.godot 勾上插件（会出现在 git diff 里）
+        interval_ms = 200,
+        -- log_path = nil,   -- 手动指定桥日志路径；nil = user://nvim_debug_bridge.log
     },
 
     ------------------------------------------------------------

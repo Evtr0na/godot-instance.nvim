@@ -258,6 +258,21 @@ local published = {
     items = {},
 }
 
+-- 其它诊断来源（编辑器报错桥）。只在展示时并入，不参与清空。
+local extra_sources = {}
+
+--- 注册一个额外的诊断来源。
+--- @param fn fun(): table[] 返回 { bufnr, path, item } 列表
+function M.register_diagnostics(fn)
+    for _, existing in ipairs(extra_sources) do
+        if existing == fn then
+            return
+        end
+    end
+
+    extra_sources[#extra_sources + 1] = fn
+end
+
 function reset_parse()
     pending = nil
     shader_mark = nil
@@ -596,6 +611,22 @@ function M.diagnostics()
                     path = vim.api.nvim_buf_get_name(bufnr),
                     item = item,
                 }
+            end
+        end
+    end
+
+    --------------------------------------------------------
+    -- 并入其它来源（编辑器报错桥）。
+    -- 只影响展示（diagnostics / quickfix / :GodotDebugErrors），
+    -- 不影响清空时机：编辑器报错不该被「游戏又跑了一次」清掉。
+    --------------------------------------------------------
+
+    for _, fn in ipairs(extra_sources) do
+        local ok, extra = pcall(fn)
+
+        if ok and type(extra) == "table" then
+            for _, entry in ipairs(extra) do
+                out[#out + 1] = entry
             end
         end
     end

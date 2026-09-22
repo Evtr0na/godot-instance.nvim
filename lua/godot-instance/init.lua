@@ -16,6 +16,7 @@ local lsp = require("godot-instance.lsp")
 local instance = require("godot-instance.instance")
 local godotdev = require("godot-instance.godotdev")
 local debuglog = require("godot-instance.debuglog")
+local bridge = require("godot-instance.bridge")
 
 local notify = util.notify
 local same_path = util.same_path
@@ -212,6 +213,31 @@ function M.bootstrap(opts)
         desc = "Jump to the previous Godot debug error",
     })
 
+    ------------------------------------------------------------
+    -- 编辑器报错桥
+    ------------------------------------------------------------
+
+    create_command("GodotBridge", function()
+        local result = bridge.sync()
+        local info = bridge.info()
+
+        notify(table.concat({
+            "godot-instance.nvim 编辑器报错桥",
+            "",
+            "项目      : " .. tostring(info.root or result.root or "-"),
+            "addon     : " .. tostring(info.addon or "-"),
+            "注入      : " .. tostring(result.inject or "-"),
+            "启用插件  : " .. tostring(result.enable or "-"),
+            "桥日志    : " .. tostring(info.path or "-") .. (info.exists and "（存在）" or "（还没有）"),
+            "已收报错  : " .. tostring(info.count) .. " 条",
+            "",
+            "Godot 只在启动时加载编辑器插件：第一次注入后要重启一次编辑器",
+            "（或在 Godot 里「项目 -> 重新加载当前项目」）。",
+        }, "\n"))
+    end, {
+        desc = "Sync and show the Godot editor error bridge status",
+    })
+
     local group = vim.api.nvim_create_augroup("godot_instance_manager", { clear = true })
 
     -- Auto-bind only while this Nvim has no active Godot project. The actual
@@ -277,6 +303,7 @@ M.ensure_plugin_ready = godotdev.ensure_plugin_ready
 M.config = config
 M.state = state
 M.debuglog = debuglog
+M.bridge = bridge
 
 --- 配置 + 启动引导（幂等）。lazy 的 opts 会自动传进来。
 --- @param opts table?
@@ -289,6 +316,21 @@ function M.setup(opts)
     -- 是幂等的，重跑一次才让 keymap 这类配置项真正生效。
     if config.debuglog == nil or config.debuglog.enabled ~= false then
         debuglog.setup()
+    end
+
+    --------------------------------------------------------
+    -- 编辑器报错桥
+    --
+    -- 它产生的诊断并进 debuglog 的展示（quickfix / :GodotDebugErrors /
+    -- Trouble 本来就能看到），但两边的清空时机保持独立。
+    --------------------------------------------------------
+
+    if config.bridge == nil or config.bridge.enabled ~= false then
+        bridge.setup()
+
+        if config.debuglog == nil or config.debuglog.enabled ~= false then
+            debuglog.register_diagnostics(bridge.diagnostics)
+        end
     end
 
     return true

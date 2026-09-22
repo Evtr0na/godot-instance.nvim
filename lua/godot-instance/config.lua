@@ -107,6 +107,41 @@ M.options = {
 
     },
 
+    ------------------------------------------------------------
+    -- 编辑器报错桥（Godot 编辑器 -> Nvim）
+    ------------------------------------------------------------
+    -- 编辑器侧的报错（最典型的是 gdshader 编译失败）只进 Godot 的 Output
+    -- 面板，不写进 user://logs/godot.log，所以 debuglog 那条 tail 日志的
+    -- 路看不到它。
+    --
+    -- 本模块往项目里注入一个 EditorPlugin（addons/nvim_debug_bridge/），
+    -- 它用 OS.add_logger() 挂 Logger，把编辑器报错按 JSON 一行写到
+    -- user://nvim_debug_bridge.log，这里 tail 它并转成诊断。
+    --
+    -- 注意：Godot 只在启动时加载编辑器插件，所以第一次注入后需要
+    -- **重启一次编辑器**（或在 Godot 里「项目 -> 重新加载当前项目」）。
+    bridge = {
+
+        enabled = true,
+
+        -- 把 addon 文件写进 <项目>/addons/nvim_debug_bridge/
+        -- 内容一致就复用；内容不同但不是我们注入的（没有 managed 标记）
+        -- 就绝不覆盖，只提示。
+        inject = true,
+
+        -- 自动改 project.godot 的 [editor_plugins] enabled 把插件勾上。
+        -- Godot 必须看到这一项才会加载编辑器插件。关掉的话就自己去
+        -- 「项目设置 -> 插件」里勾一次。
+        auto_enable = true,
+
+        -- 轮询间隔（毫秒）
+        interval_ms = 200,
+
+        -- 手动指定桥日志路径；nil = user://nvim_debug_bridge.log
+        log_path = nil,
+
+    },
+
 }
 
 --- @param opts table?

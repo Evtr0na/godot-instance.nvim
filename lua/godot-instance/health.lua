@@ -135,6 +135,49 @@ function M.check()
         end
     end
 
+    h.start("godot-instance: 编辑器报错桥")
+
+    if config.bridge and config.bridge.enabled == false then
+        h.info("已关闭（config.bridge.enabled = false）")
+    else
+        local info = require("godot-instance.bridge").info()
+
+        if not info.root then
+            h.info("当前不在 Godot 项目里，桥未启动")
+        else
+            h.ok("项目：" .. info.root)
+
+            if info.injected then
+                h.ok("addon 已注入：" .. tostring(info.addon))
+            else
+                h.warn(
+                    "addon 还没注入：" .. tostring(info.addon),
+                    "在项目里开个 .gd 文件触发一次 :GodotBridge 即可"
+                )
+            end
+
+            if info.enabled then
+                h.ok("project.godot 里已勾上该插件")
+            else
+                h.warn(
+                    "project.godot 的 [editor_plugins] 里没有这个插件，Godot 不会加载它",
+                    "打开 config.bridge.auto_enable，或在 Godot 里「项目设置 -> 插件」手动勾一次"
+                )
+            end
+
+            if info.exists then
+                h.ok("桥日志：" .. info.path)
+            else
+                h.warn(
+                    "桥日志还不存在：" .. tostring(info.path),
+                    "Godot 只在启动时加载编辑器插件 —— 第一次注入后需要重启一次编辑器"
+                )
+            end
+
+            h.info(("已收编辑器报错：%d 条"):format(info.count))
+        end
+    end
+
     h.start("godot-instance: 实例记录")
 
     local found = 0
