@@ -15,6 +15,7 @@ local project = require("godot-instance.project")
 local lsp = require("godot-instance.lsp")
 local instance = require("godot-instance.instance")
 local godotdev = require("godot-instance.godotdev")
+local debuglog = require("godot-instance.debuglog")
 
 local notify = util.notify
 local same_path = util.same_path
@@ -63,20 +64,50 @@ local function setup_remote_open()
                 return
             end
 
-            local ok_drop, err = pcall(vim.api.nvim_cmd, {
-                cmd = "drop",
-                args = { file },
-                magic = { file = false, bar = false },
-            }, {})
+            ----------------------------------------------------
+            -- 不要用 nvim_cmd({ cmd = "drop", args = { file } })。
+            -- nvim_cmd 的 args 会先拼成命令行再解析，路径里的空格会被当成
+            -- 参数分隔符 —— "D:/a/my proj/x.gd" 实测被截成 "D:/a/my"，
+            -- 于是双击文件 / 点报错打开的是错的文件。
+            -- 这里直接操作 buffer，完全不经过命令行解析。
+            ----------------------------------------------------
 
-            if not ok_drop then
-                notify("Godot remote open failed:\n" .. tostring(err), vim.log.levels.ERROR)
-                return
+            local ok_open, open_error = pcall(function()
+                local bufnr = nil
+
+                for _, existing in ipairs(vim.api.nvim_list_bufs()) do
+                    if
+                        vim.api.nvim_buf_is_valid(existing)
+                        and same_path(vim.api.nvim_buf_get_name(existing), file)
+                    then
+                        bufnr = existing
+                        break
+                    end
+                end
+
+                if not bufnr then
+                    bufnr = vim.fn.bufadd(file)
+                end
+
+                vim.fn.bufload(bufnr)
+
+                -- :drop 的语义：已经显示在某个窗口里就跳过去，否则在当前窗口打开
+                local win = vim.fn.bufwinid(bufnr)
+
+                if win ~= -1 then
+                    vim.api.nvim_set_current_win(win)
+                else
+                    vim.api.nvim_win_set_buf(0, bufnr)
+                end
+
+                -- Preserve the old router's cursor() semantics: both values are
+                -- 1-based and Vim handles clamping for us.
+                vim.fn.cursor(line, column)
+            end)
+
+            if not ok_open then
+                notify("Godot remote open failed:\n" .. tostring(open_error), vim.log.levels.ERROR)
             end
-
-            -- Preserve the old router's cursor() semantics: both values are
-            -- 1-based and Vim handles clamping for us.
-            pcall(vim.fn.cursor, line, column)
         end)
 
         return 1
@@ -133,6 +164,52 @@ function M.bootstrap(opts)
         M.status()
     end, {
         desc = "Show Godot instance status",
+    })
+
+    ------------------------------------------------------------
+    -- 调试日志（编辑器里 F5 / F6 的报错）
+    ------------------------------------------------------------
+
+    create_command("GodotDebugLog", function()
+        debuglog.toggle()
+    end, {
+        desc = "Toggle the Godot debug log panel (F5/F6 output)",
+    })
+
+    create_command("GodotDebugErrors", function()
+        debuglog.errors()
+    end, {
+        desc = "Show Godot debug errors (trouble.nvim, quickfix fallback)",
+    })
+
+    create_command("GodotDebugQuickfix", function()
+        debuglog.quickfix()
+    end, {
+        desc = "Put Godot debug errors into the quickfix list",
+    })
+
+    create_command("GodotDebugPath", function()
+        debuglog.path()
+    end, {
+        desc = "Show the Godot log file path",
+    })
+
+    create_command("GodotDebugClear", function()
+        debuglog.clear()
+    end, {
+        desc = "Clear the Godot debug panel and its diagnostics",
+    })
+
+    create_command("GodotDebugNext", function()
+        debuglog.next()
+    end, {
+        desc = "Jump to the next Godot debug error",
+    })
+
+    create_command("GodotDebugPrev", function()
+        debuglog.prev()
+    end, {
+        desc = "Jump to the previous Godot debug error",
     })
 
     local group = vim.api.nvim_create_augroup("godot_instance_manager", { clear = true })
@@ -199,12 +276,22 @@ M.ensure_plugin_ready = godotdev.ensure_plugin_ready
 
 M.config = config
 M.state = state
+M.debuglog = debuglog
 
 --- 配置 + 启动引导（幂等）。lazy 的 opts 会自动传进来。
 --- @param opts table?
 function M.setup(opts)
     config_mod.setup(opts)
-    return M.bootstrap()
+    M.bootstrap()
+
+    -- 必须在配置合并之后再走一遍：plugin/ 里的自动引导跑在 lazy 的 opts
+    -- 之前，那一次用的是默认配置（debuglog.keymap 默认 false）。debuglog.setup()
+    -- 是幂等的，重跑一次才让 keymap 这类配置项真正生效。
+    if config.debuglog == nil or config.debuglog.enabled ~= false then
+        debuglog.setup()
+    end
+
+    return true
 end
 
 --- 插件自带脚本的位置，以及 Godot 侧该怎么填。

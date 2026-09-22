@@ -50,6 +50,46 @@ M.options = {
     -- 实例状态文件目录，nil = stdpath("state")/godot_instance
     state_dir = nil,
 
+    ------------------------------------------------------------
+    -- 调试日志（Godot 编辑器里按 F5 / F6 的报错）
+    ------------------------------------------------------------
+    -- 编辑器启动的游戏，stdout 被编辑器自己吞掉，Nvim 看不到。Godot 桌面
+    -- 平台默认会把游戏输出写进 user://logs/godot.log，这里 tail 它。
+    -- 详见 lua/godot-instance/debuglog.lua 头部。
+    debuglog = {
+
+        enabled = true,
+
+        -- 轮询间隔（毫秒）。日志是逐行 flush 的，200ms 已经足够实时。
+        interval_ms = 200,
+
+        -- 检测到新一轮运行（Godot 启动横幅）时是否自动打开面板。
+        -- 默认关：跑项目时不要凭空多出一个分屏，要看时 :GodotDebugLog 打开。
+        -- 诊断不受这个开关影响，一直都在。
+        auto_open = false,
+
+        -- 面板位置："bottom" | "right" | "float"
+        position = "bottom",
+        size = 0.3,
+
+        -- 面板最多保留多少行，超出丢弃最旧的
+        max_lines = 5000,
+
+        -- 手动指定日志路径；nil = 按项目名自动推导
+        log_path = nil,
+
+        -- 把报错解析成真正的 vim.diagnostic，于是 Trouble / 跳转 /
+        -- 行号符号全都直接可用
+        diagnostics = {
+            enabled = true,
+        },
+
+        -- 快捷键；false = 不设置（默认不占键位，插件不该强加映射）
+        keymap = false,        -- 开关面板
+        keymap_errors = false, -- 展示报错（Trouble 优先，quickfix 兜底）
+
+    },
+
 }
 
 --- @param opts table?

@@ -102,6 +102,39 @@ function M.check()
         end
     end
 
+    h.start("godot-instance: 调试日志")
+
+    if config.debuglog and config.debuglog.enabled == false then
+        h.info("已关闭（config.debuglog.enabled = false）")
+    else
+        local info = require("godot-instance.debuglog").info()
+
+        if not info.root then
+            h.info("当前不在 Godot 项目里，日志监控未启动")
+        else
+            h.ok("项目：" .. info.root)
+
+            if info.exists then
+                h.ok("日志文件：" .. info.path)
+            else
+                h.warn(
+                    "日志文件还不存在：" .. tostring(info.path),
+                    "在 Godot 编辑器里按 F5 / F6 跑一次游戏。若仍无日志，检查项目设置 "
+                        .. "debug/file_logging/enable_file_logging（桌面平台默认是开的）"
+                )
+            end
+
+            h.info(("已解析诊断：%d 条"):format(info.count))
+        end
+
+        -- 展示出口：Trouble 优先，quickfix 兜底。这里只报告实际会用哪条路。
+        if vim.fn.exists(":Trouble") == 2 or pcall(require, "trouble") then
+            h.ok("trouble.nvim 可用：:GodotDebugErrors 走 Trouble diagnostics")
+        else
+            h.info("没装 trouble.nvim：:GodotDebugErrors 会退回 quickfix（不是硬依赖）")
+        end
+    end
+
     h.start("godot-instance: 实例记录")
 
     local found = 0
