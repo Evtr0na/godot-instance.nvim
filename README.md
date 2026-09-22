@@ -172,6 +172,35 @@ SHADER ERROR: Unknown identifier in expression: 'undeclared_variable'.
 
 另外 `[Resource file res://xxx.tscn:9]` 这种带路径的资源报错也会被识别。
 
+### 终端残影（日志“盖”在代码上）
+
+如果 Godot 编辑器和 Nvim **共用同一个终端**（同一个 pty —— 比如你在某个
+WezTerm pane 里先起了 Godot 编辑器，之后又在同一个 pane 里跑 Nvim；
+godot-instance 复用它时不会改它的 console），那么编辑器 F5 起的游戏会继承
+那个 pty，**stdout 直接写进 Nvim 的画面**。
+
+特征很好认（对照实际截图确认过）：
+
+- 文字**从第 0 列写进去**，压住行号栏 —— 正常代码绝不会出现在那里；
+- 光标所在行会出现「左半行正常、右半行是日志」；
+- 把光标移到那些位置就恢复（Nvim 重绘了那几行），切 buffer 也会恢复；
+- gdshader 报错更顽固，因为 shader 会反复重编译、反复往终端写。
+
+**这不是 Nvim 画的，Nvim 也拦不住**（它没法阻止别的进程往同一个 pty 写）。
+两种处理：
+
+1. **根治**：把 Godot 编辑器放到**另一个** WezTerm pane / tab 里启动，别和
+   Nvim 共用一个终端。用 `:GodotStatus` 看「实例来源」—— 如果显示
+   `external editor (reused)`，那就是复用了你在别处开的那个编辑器。
+2. **兜底**（默认开）：`debuglog.redraw_on_output = true`。残影和日志增长是
+   同一个进程同时发生的，所以一有新日志就整屏重绘一次，把残影压到一个轮询
+   周期之内。按 `redraw_throttle_ms`（默认 500ms）节流；游戏疯狂 print 时会
+   持续重绘，嫌闪就关掉。
+
+顺带说明：Godot 的 `application/run/disable_stdout = true` **治不了这个** ——
+它只压掉 `print`（连日志文件里也没了），`push_error` / `SCRIPT ERROR` 照样
+走 stderr。
+
 ## 配置
 
 ```lua
@@ -215,6 +244,9 @@ require("godot-instance").setup({
         diagnostics = {
             enabled = true,     -- 解析成 vim.diagnostic（Trouble 等直接用）
         },
+        -- 终端残影兜底：一有新日志就整屏重绘（编辑器与 Nvim 共用 pty 时用）
+        redraw_on_output = true,
+        redraw_throttle_ms = 500,
         -- 插件默认不占键位，要快捷键就显式给
         keymap = false,         -- 开关面板
         keymap_errors = false,  -- 报错列表（Trouble 优先，quickfix 兜底）

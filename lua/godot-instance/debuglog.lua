@@ -48,6 +48,7 @@ M.state = {
     total = 0,
     last_run_at = nil,
     rotated = false,
+    last_redraw_at = nil,
 }
 
 ------------------------------------------------------------
@@ -804,22 +805,62 @@ end
 -- 面板 buffer
 ------------------------------------------------------------
 
-local function ensure_buffer()
+--- 这个 buffer 号现在还是不是我们的面板 buffer。
+---
+--- 和窗口 id 一样，buffer 号也会被 Neovim 回收给新 buffer。所以不能只信
+--- M.state.buf：那个号可能已经属于用户的某个文件了，此时往它里面写日志
+--- 就会把日志灌进用户正在编辑的文件里。用 buffer 名字做身份校验。
+local PANEL_BUFFER_NAME = "godot://debuglog"
+
+--- @return integer?
+local function panel_buffer()
     local buf = M.state.buf
 
-    if buf and vim.api.nvim_buf_is_valid(buf) then
-        if vim.api.nvim_buf_is_loaded(buf) then
-            return buf
-        end
-
-        ----------------------------------------------------
-        -- 被 :bdelete / :bunload 过：句柄还有效，但内容没了，而且
-        -- "godot://debuglog" 这个名字还被它占着。直接删掉重建，
-        -- 否则 nvim_buf_set_name 会因为重名失败。
-        ----------------------------------------------------
-
-        pcall(vim.api.nvim_buf_delete, buf, { force = true })
+    if not buf or not vim.api.nvim_buf_is_valid(buf) or not vim.api.nvim_buf_is_loaded(buf) then
+        return nil
     end
+
+    if vim.api.nvim_buf_get_name(buf) ~= PANEL_BUFFER_NAME then
+        return nil
+    end
+
+    return buf
+end
+
+local function ensure_buffer()
+    --------------------------------------------------------
+    -- 1) 记着的那个 id 现在还是我们的面板 buffer 吗
+    --------------------------------------------------------
+
+    local buf = panel_buffer()
+
+    if buf then
+        return buf
+    end
+
+    --------------------------------------------------------
+    -- 2) 按名字在全部 buffer 里找回面板 buffer。
+    --
+    -- 不能只信 M.state.buf：
+    --   * buffer 号会被 Neovim 回收给别的 buffer —— 往那个号里写日志
+    --     就等于把日志灌进用户正在编辑的文件里；
+    --   * 名字可能还被一个我们跟丢了的 buffer 占着 —— 不处理的话下面
+    --     nvim_buf_set_name 会因为重名直接报错。
+    --------------------------------------------------------
+
+    for _, other in ipairs(vim.api.nvim_list_bufs()) do
+        if vim.api.nvim_buf_is_valid(other) and vim.api.nvim_buf_get_name(other) == PANEL_BUFFER_NAME then
+            if vim.api.nvim_buf_is_loaded(other) then
+                M.state.buf = other
+                return other
+            end
+
+            -- 被 :bunload 过：内容没了但名字还占着，删掉腾位置
+            pcall(vim.api.nvim_buf_delete, other, { force = true })
+        end
+    end
+
+    M.state.buf = nil
 
     buf = vim.api.nvim_create_buf(false, true)
 
@@ -923,20 +964,52 @@ local function apply_highlights(win)
     end)
 end
 
-local function open_panel()
-    local buf = ensure_buffer()
+--- 取出「确实是面板窗口」的那个窗口。
+---
+--- 不能只信 M.state.win：窗口被关掉之后这个 id 就悬空了，而 Neovim 会把
+--- 窗口 id 回收给新窗口用 —— 于是 nvim_win_is_valid(旧 id) 为真，面板就被
+--- 塞进用户的编辑窗口里，表现是「日志内容覆盖在当前 buffer 上，切 buffer
+--- 才恢复」（实测踩过）。所以必须确认那个窗口现在显示的**就是**面板 buffer。
+--- @return integer?
+local function panel_window()
     local win = M.state.win
 
-    if win and vim.api.nvim_win_is_valid(win) then
-        if vim.api.nvim_win_get_buf(win) ~= buf then
-            vim.api.nvim_win_set_buf(win, buf)
-        end
-
-        apply_highlights(win)
-
-        return win
+    if not win or not vim.api.nvim_win_is_valid(win) then
+        M.state.win = nil
+        return nil
     end
 
+    -- 面板永远不是浮窗；是浮窗说明这个 id 已经被回收了
+    if vim.api.nvim_win_get_config(win).relative ~= "" then
+        M.state.win = nil
+        return nil
+    end
+
+    if not M.state.buf or vim.api.nvim_win_get_buf(win) ~= M.state.buf then
+        M.state.win = nil
+        return nil
+    end
+
+    -- buffer 号也可能被回收，一并校验身份
+    if vim.api.nvim_buf_get_name(M.state.buf) ~= PANEL_BUFFER_NAME then
+        M.state.win = nil
+        return nil
+    end
+
+    return win
+end
+
+local function open_panel()
+    local buf = ensure_buffer()
+
+    local existing = panel_window()
+
+    if existing then
+        apply_highlights(existing)
+        return existing
+    end
+
+    local win = nil
     local position = opts().position or "bottom"
     local size = opts().size or 0.3
 
@@ -958,13 +1031,32 @@ local function open_panel()
     else
         local lines = math.max(math.floor(vim.o.lines * size), 8)
 
+        ----------------------------------------------------
+        -- 先记下当前有哪些窗口。开分屏会触发 BufEnter / WinNew 之类的
+        -- autocmd，焦点可能被别的插件挪走 —— 所以不能假设开完之后当前
+        -- 窗口就是新建的那个，得按窗口集合的差集去找。
+        ----------------------------------------------------
+
+        local before = {}
+
+        for _, w in ipairs(vim.api.nvim_list_wins()) do
+            before[w] = true
+        end
+
         if position == "right" then
             vim.cmd(("botright %dvsplit"):format(math.max(math.floor(vim.o.columns * size), 40)))
         else
             vim.cmd(("botright %dsplit"):format(lines))
         end
 
-        win = vim.api.nvim_get_current_win()
+        for _, w in ipairs(vim.api.nvim_list_wins()) do
+            if not before[w] then
+                win = w
+                break
+            end
+        end
+
+        win = win or vim.api.nvim_get_current_win()
         vim.api.nvim_win_set_buf(win, buf)
     end
 
@@ -985,6 +1077,11 @@ end
 ------------------------------------------------------------
 -- 轮询
 ------------------------------------------------------------
+
+-- 前向声明：定义在 poll() 下面。Lua 里 local function 的作用域从定义处
+-- 才开始，poll() 里直接用名字会解析成全局 nil（实测报过
+-- "attempt to call global 'redraw_after_output' (a nil value)"）。
+local redraw_after_output
 
 local function poll()
     if not M.state.path and not sync_root() then
@@ -1096,7 +1193,7 @@ local function poll()
 
             append_lines({ "", ("──────── 新的运行 %s ────────"):format(os.date("%H:%M:%S")) })
 
-            if opts().auto_open ~= false and not (M.state.win and vim.api.nvim_win_is_valid(M.state.win)) then
+            if opts().auto_open ~= false and not panel_window() then
                 vim.schedule(function()
                     open_panel()
                 end)
@@ -1111,6 +1208,40 @@ local function poll()
     publish_if_ready()
 
     append_lines(lines)
+
+    redraw_after_output()
+end
+
+--- 终端残影兜底。
+---
+--- 如果 Godot 编辑器（以及它 F5 起的游戏）和 Nvim 共用同一个终端，游戏的
+--- stdout 会直接写进 Nvim 的画面 —— 文字从第 0 列写进去、压住行号栏，
+--- 光标扫过才恢复。那不是 Nvim 画的，Nvim 拦不住。
+---
+--- 但那种写入和日志增长是同一个进程同时发生的，所以一有新日志就整屏重绘
+--- 一次，能把残影压到一个轮询周期之内。按 redraw_throttle_ms 节流。
+--- 注意：这里是 function 而不是 local function —— 上面已经前向声明过，
+--- 写成 local function 会新建一个局部变量把前向声明遮蔽掉，poll() 那边
+--- 拿到的仍然是 nil。
+function redraw_after_output()
+    if opts().redraw_on_output == false then
+        return
+    end
+    -- headless 没有屏幕；而且实测在 headless 下从调度回调里 :redraw! 会把
+    -- 事件循环卡住
+    if #vim.api.nvim_list_uis() == 0 then
+        return
+    end
+
+    local now = util.now_ms()
+    local throttle = opts().redraw_throttle_ms or 500
+
+    if M.state.last_redraw_at and (now - M.state.last_redraw_at) < throttle then
+        return
+    end
+
+    M.state.last_redraw_at = now
+    pcall(vim.cmd, "redraw!")
 end
 
 local function ensure_timer()
@@ -1159,15 +1290,11 @@ function M.show()
     -- 空白。这里检测到 buffer 不可用了就把读取位置、解析状态、诊断全部
     -- 重置，下面按「首次打开」的路径把已有日志重新灌一遍。
     --
-    -- 注意 :bdelete 只是 unload：句柄仍然 valid，所以必须连 loaded 一起判。
+    -- 注意 :bdelete 只是 unload：句柄仍然 valid，所以必须连 loaded 和
+    -- buffer 名字一起判（走 panel_buffer 的身份校验）。
     --------------------------------------------------------
 
-    local existing = M.state.buf
-    local usable = existing
-        and vim.api.nvim_buf_is_valid(existing)
-        and vim.api.nvim_buf_is_loaded(existing)
-
-    if not usable then
+    if not panel_buffer() then
         M.state.offset = 0
         M.state.partial = ""
         M.state.total = 0
@@ -1224,15 +1351,17 @@ function M.show()
 end
 
 function M.hide()
-    if M.state.win and vim.api.nvim_win_is_valid(M.state.win) then
-        vim.api.nvim_win_close(M.state.win, true)
+    local win = panel_window()
+
+    if win then
+        pcall(vim.api.nvim_win_close, win, true)
     end
 
     M.state.win = nil
 end
 
 function M.toggle()
-    if M.state.win and vim.api.nvim_win_is_valid(M.state.win) then
+    if panel_window() then
         M.hide()
     else
         M.show()
@@ -1286,6 +1415,46 @@ function M.setup()
             if M.state.root then
                 ensure_timer()
             end
+        end,
+    })
+
+    --------------------------------------------------------
+    -- 面板窗口被关掉时立刻清掉记录。
+    --
+    -- 不这么做的话 M.state.win 会悬空，而 Neovim 会把窗口 id 回收给新窗口，
+    -- 之后 open_panel() 就会把日志塞进用户的编辑窗口（"覆盖当前 buffer"）。
+    --------------------------------------------------------
+
+    vim.api.nvim_create_autocmd("WinClosed", {
+        group = group,
+        callback = function(args)
+            local closed = tonumber(args.match)
+
+            if not closed or M.state.win ~= closed then
+                return
+            end
+
+            M.state.win = nil
+
+            ----------------------------------------------------
+            -- 面板窗口消失后主窗口会重新占满，整屏要重排。
+            --
+            -- 某些终端（实测 WezTerm + nvim 0.12）在这种重排后会漏掉
+            -- 一部分单元格的重绘，留下「日志残影浮在代码上、光标扫过去
+            -- 才恢复」的现象。这里主动整屏重绘一次，把残影抹掉。
+            --
+            -- 用 schedule：WinClosed 回调期间不适合直接重绘。
+            ----------------------------------------------------
+
+            vim.schedule(function()
+                -- headless 没有屏幕，重绘没有意义；而且实测在 headless 下
+                -- 从调度回调里触发 :redraw! 会把事件循环卡住，所以跳过。
+                if #vim.api.nvim_list_uis() == 0 then
+                    return
+                end
+
+                pcall(vim.cmd, "redraw!")
+            end)
         end,
     })
 
