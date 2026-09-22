@@ -253,33 +253,28 @@ local pending = nil
 local shader_mark = nil
 
 -- 已发布的诊断：path_key -> bufnr，path_key -> { diagnostic, ... }
+--
+-- 注意这里**刻意不做「文件改动就过期」**，和编辑器报错桥（bridge.lua）不一样。
+--
+-- 两边的生命周期根本不同：
+--
+--   * 桥管的是**编辑器侧**的报错（gdshader 编译失败之类）。你在 Nvim 里把
+--     shader 改对，那个错就真的不存在了 —— 所以它必须跟着文件走，
+--     改了内容就作废。
+--   * 这里管的是**游戏运行期**的报错。它属于**跑完的那一轮运行**，是一份历史
+--     记录：你改代码并不会让上一轮运行的报错「没有发生过」。
+--
+-- 所以：改代码（改对也好、改成另一个错也好）都不该动它，上一次运行的报错
+-- 会一直挂到**下一次运行**（见 poll() 里的 rotated / new_run：新一轮开始就
+-- 清空重来）。Godot 自己的调试器面板就是这个行为。
+--
+-- 实测踩过的坑：早先跟着 mtime 过期（后来还加了内容指纹），结果是「我一改
+-- 代码报错就消失」，而那时候游戏根本还没重跑 —— 既丢了一份还有效的历史，
+-- 又让人以为「已经修好了」。
 local published = {
     buffers = {},
     items = {},
-    -- path_key -> { mtime = <发布时间>, hash = <内容指纹> }。
-    --
-    -- 游戏日志里的报错属于**过去那一轮运行**。你把脚本改好之后，旧报错就
-    -- 已经不对应当前这一版代码了，但它还挂在诊断列表里 —— 而日志文件不会
-    -- 因此变化，`clear_diagnostics` 又只在「新的一轮运行」时才跑，于是表现
-    -- 就是「明明改对了还在报，只有重启 Nvim 才消失」。
-    --
-    -- 只看 mtime 不够：同一份代码再保存一次也会改 mtime，那时候代码没改，
-    -- 诊断不该消失（否则就是「我没动代码，报错却自己没了」）。所以连内容
-    -- 指纹一起记，只有内容真的变了才作废。
-    stamps = {},
 }
-
---- 文件内容指纹。读不到就返回 nil。
---- @return string?
-local function file_hash(path)
-    local ok, lines = pcall(vim.fn.readfile, path, "b")
-
-    if not ok or type(lines) ~= "table" then
-        return nil
-    end
-
-    return vim.fn.sha256(table.concat(lines, "\n"))
-end
 
 -- 其它诊断来源（编辑器报错桥）。只在展示时并入，不参与清空。
 local extra_sources = {}
@@ -452,71 +447,7 @@ local function add_diagnostic(path, item)
     list[#list + 1] = item
     published.items[key] = list
 
-    --------------------------------------------------------
-    -- 记下发布时的 mtime + 内容指纹：这条诊断描述的是**这一版**文件。
-    -- 文件之后真的改动了（见 expire_changed_files），它就作废。
-    --------------------------------------------------------
-
-    if published.stamps[key] == nil then
-        published.stamps[key] = {
-            mtime = vim.fn.getftime(path),
-            hash = file_hash(path),
-        }
-    end
-
     vim.diagnostic.set(ns, bufnr, list)
-end
-
---- 清掉某个文件的诊断。
-local function clear_diagnostics_for(path)
-    local key = path_key(path)
-
-    if not key then
-        return
-    end
-
-    local bufnr = published.buffers[key]
-
-    if bufnr and vim.api.nvim_buf_is_valid(bufnr) then
-        vim.diagnostic.reset(ns, bufnr)
-    end
-
-    published.buffers[key] = nil
-    published.items[key] = nil
-    published.stamps[key] = nil
-end
-
---- 文件改动过就把它身上的旧诊断作废。
----
---- 每轮 poll 都会检查：改好了但游戏没有重新跑（日志没有新增），旧报错
---- 仍然挂在列表里 —— 这里负责把它清掉。
----
---- mtime 变了**不等于**内容变了：又保存了一次同样的代码时，诊断要留着。
-local function expire_changed_files()
-    local stale = {}
-
-    for key, bufnr in pairs(published.buffers) do
-        if bufnr and vim.api.nvim_buf_is_valid(bufnr) then
-            local path = vim.api.nvim_buf_get_name(bufnr)
-            local stamp = vim.fn.getftime(path)
-            local known = published.stamps[key]
-
-            if stamp > 0 and known and known.mtime and stamp ~= known.mtime then
-                local now_hash = file_hash(path)
-
-                if known.hash and now_hash and known.hash == now_hash then
-                    -- 内容没变（只是又保存了一次）：保留诊断，只推进 mtime 快照
-                    known.mtime = stamp
-                else
-                    stale[#stale + 1] = path
-                end
-            end
-        end
-    end
-
-    for _, path in ipairs(stale) do
-        clear_diagnostics_for(path)
-    end
 end
 
 local function emit(path, lnum, block, user_data)
@@ -677,7 +608,6 @@ function M.clear_diagnostics()
 
     published.buffers = {}
     published.items = {}
-    published.stamps = {}
 
     if vim.diagnostic.reset then
         pcall(vim.diagnostic.reset, ns)
@@ -1204,13 +1134,13 @@ local redraw_after_output
 
 local function poll()
     --------------------------------------------------------
-    -- 先让改动过的文件上的旧诊断作废。
+    -- 这里**没有**「文件改动就清诊断」这一步，是故意的。
     --
-    -- 必须放在所有提前 return 之前：改好脚本之后日志通常**不会**再有新增
-    -- （游戏没重跑），下面那些 `return` 会直接跳过清理，旧报错就一直挂着。
+    -- 运行期报错属于跑完的那一轮运行，是一份历史；改代码不会让它没发生过。
+    -- 上一轮运行的报错会一直留着，直到**下一轮运行**开始 —— 下面 rotated /
+    -- new_run 那两处会先 clear_diagnostics()，再按新日志重新发布。
+    -- （编辑器报错桥 bridge.lua 那边的生命周期不同，那边才是跟着文件走的。）
     --------------------------------------------------------
-
-    expire_changed_files()
 
     if not M.state.path and not sync_root() then
         return
