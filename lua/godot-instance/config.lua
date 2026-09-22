@@ -17,6 +17,29 @@ M.options = {
     -- Godot's editor window can steal the foreground window on Windows when it
     -- is launched automatically. Keep the terminal/Nvim focused by default.
     preserve_focus_on_start = true,
+
+    ------------------------------------------------------------
+    -- 启动 Godot 时套一层「无控制台」的中间进程（仅 Windows）
+    ------------------------------------------------------------
+    -- Godot 启动时会 AttachConsole(ATTACH_PARENT_PROCESS)，然后把自己（以及
+    -- 它 F5 起的游戏）的 stdout/stderr 接到那个控制台上。如果 Godot 是从
+    -- Nvim 里启动的，那个控制台就是 Nvim 所在的终端 —— 游戏输出会直接写进
+    -- Nvim 的画面，字符错乱、行号错位，Nvim 完全不知情。
+    --
+    -- 开着这个开关时，Godot 的父进程是一个 detached 的 cmd.exe（没有控制台），
+    -- AttachConsole 找不到可挂的控制台，整条链就断了。
+    --
+    -- 代价：uv.spawn 拿到的是 cmd 的 PID，插件会再查一次真正的 Godot PID
+    -- （焦点守卫、优雅关闭、实例记录都要用它）。
+    --
+    -- 注意：中间层必须 detached 才有效（detached 的进程没有控制台），而
+    -- detached 跟 keep_alive 是同一个开关 —— 所以**这个开关只在
+    -- keep_alive = true 时生效**。keep_alive = false 时要靠 libuv 的 job
+    -- object 保证「Godot 活不过 Nvim」，而 job object 里的进程会继承控制台，
+    -- 两者没法兼得；那种配置下会退回旧行为（游戏输出仍会污染终端）。
+    --
+    -- 关掉就恢复旧行为。
+    console_wrapper = true,
     focus_guard_timeout_ms = 5000,
     focus_guard_poll_ms = 40,
     lsp_port_poll_ms = 25,
@@ -136,6 +159,33 @@ M.options = {
 
         -- 轮询间隔（毫秒）
         interval_ms = 200,
+
+        -- 把编辑器报错也写进调试面板，这样 <leader>gD 就能实时看到
+        -- （否则只在诊断里，要看只能 <leader>xx / :GodotDebugErrors）
+        show_in_panel = true,
+
+        -- GDScript 解析级联抑制。
+        --
+        -- 一个真正的语法错会让 GDScript 解析器恢复失败，然后吐出一堆下游
+        -- 假错（实测一个未闭合的 func 报出 7 条，行号散落在 154~198，
+        -- 198 还超出文件总行数 196），看起来就像「乱报错」。
+        -- 打开后只留每条「解析轮次」的第一条（第一条通常就是根因）。
+        --
+        -- 只在 script_errors = true 时才有意义（默认那类报错根本不发）。
+        collapse_script_parse_errors = true,
+
+        -- 上面那个「同一轮解析」的时间窗（毫秒）
+        parse_burst_window_ms = 3000,
+
+        -- 是否把**编辑器侧**的 GDScript 报错也发过来。
+        --
+        -- 默认关：这类报错和 godotdev.nvim 的 LSP 诊断是同一份东西（同一个
+        -- GDScript 解析器、同一批语法错误），两边都报就是重复。
+        --
+        -- 游戏跑起来之后的脚本报错**不受这个开关影响** —— 那是游戏进程写进
+        -- godot.log 的，走 debuglog 那条路。也就是说：「运行以后的调试报错」
+        -- 一直都有，这里管的是「编辑器里就存在的、LSP 也能看到的」那些。
+        script_errors = false,
 
         -- 手动指定桥日志路径；nil = user://nvim_debug_bridge.log
         log_path = nil,

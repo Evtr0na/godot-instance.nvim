@@ -256,7 +256,30 @@ local shader_mark = nil
 local published = {
     buffers = {},
     items = {},
+    -- path_key -> { mtime = <发布时间>, hash = <内容指纹> }。
+    --
+    -- 游戏日志里的报错属于**过去那一轮运行**。你把脚本改好之后，旧报错就
+    -- 已经不对应当前这一版代码了，但它还挂在诊断列表里 —— 而日志文件不会
+    -- 因此变化，`clear_diagnostics` 又只在「新的一轮运行」时才跑，于是表现
+    -- 就是「明明改对了还在报，只有重启 Nvim 才消失」。
+    --
+    -- 只看 mtime 不够：同一份代码再保存一次也会改 mtime，那时候代码没改，
+    -- 诊断不该消失（否则就是「我没动代码，报错却自己没了」）。所以连内容
+    -- 指纹一起记，只有内容真的变了才作废。
+    stamps = {},
 }
+
+--- 文件内容指纹。读不到就返回 nil。
+--- @return string?
+local function file_hash(path)
+    local ok, lines = pcall(vim.fn.readfile, path, "b")
+
+    if not ok or type(lines) ~= "table" then
+        return nil
+    end
+
+    return vim.fn.sha256(table.concat(lines, "\n"))
+end
 
 -- 其它诊断来源（编辑器报错桥）。只在展示时并入，不参与清空。
 local extra_sources = {}
@@ -429,7 +452,71 @@ local function add_diagnostic(path, item)
     list[#list + 1] = item
     published.items[key] = list
 
+    --------------------------------------------------------
+    -- 记下发布时的 mtime + 内容指纹：这条诊断描述的是**这一版**文件。
+    -- 文件之后真的改动了（见 expire_changed_files），它就作废。
+    --------------------------------------------------------
+
+    if published.stamps[key] == nil then
+        published.stamps[key] = {
+            mtime = vim.fn.getftime(path),
+            hash = file_hash(path),
+        }
+    end
+
     vim.diagnostic.set(ns, bufnr, list)
+end
+
+--- 清掉某个文件的诊断。
+local function clear_diagnostics_for(path)
+    local key = path_key(path)
+
+    if not key then
+        return
+    end
+
+    local bufnr = published.buffers[key]
+
+    if bufnr and vim.api.nvim_buf_is_valid(bufnr) then
+        vim.diagnostic.reset(ns, bufnr)
+    end
+
+    published.buffers[key] = nil
+    published.items[key] = nil
+    published.stamps[key] = nil
+end
+
+--- 文件改动过就把它身上的旧诊断作废。
+---
+--- 每轮 poll 都会检查：改好了但游戏没有重新跑（日志没有新增），旧报错
+--- 仍然挂在列表里 —— 这里负责把它清掉。
+---
+--- mtime 变了**不等于**内容变了：又保存了一次同样的代码时，诊断要留着。
+local function expire_changed_files()
+    local stale = {}
+
+    for key, bufnr in pairs(published.buffers) do
+        if bufnr and vim.api.nvim_buf_is_valid(bufnr) then
+            local path = vim.api.nvim_buf_get_name(bufnr)
+            local stamp = vim.fn.getftime(path)
+            local known = published.stamps[key]
+
+            if stamp > 0 and known and known.mtime and stamp ~= known.mtime then
+                local now_hash = file_hash(path)
+
+                if known.hash and now_hash and known.hash == now_hash then
+                    -- 内容没变（只是又保存了一次）：保留诊断，只推进 mtime 快照
+                    known.mtime = stamp
+                else
+                    stale[#stale + 1] = path
+                end
+            end
+        end
+    end
+
+    for _, path in ipairs(stale) do
+        clear_diagnostics_for(path)
+    end
 end
 
 local function emit(path, lnum, block, user_data)
@@ -590,6 +677,7 @@ function M.clear_diagnostics()
 
     published.buffers = {}
     published.items = {}
+    published.stamps = {}
 
     if vim.diagnostic.reset then
         pcall(vim.diagnostic.reset, ns)
@@ -1115,6 +1203,15 @@ end
 local redraw_after_output
 
 local function poll()
+    --------------------------------------------------------
+    -- 先让改动过的文件上的旧诊断作废。
+    --
+    -- 必须放在所有提前 return 之前：改好脚本之后日志通常**不会**再有新增
+    -- （游戏没重跑），下面那些 `return` 会直接跳过清理，旧报错就一直挂着。
+    --------------------------------------------------------
+
+    expire_changed_files()
+
     if not M.state.path and not sync_root() then
         return
     end
@@ -1397,6 +1494,12 @@ function M.toggle()
     else
         M.show()
     end
+end
+
+--- 往面板追加几行（编辑器报错桥用）。
+--- 面板没开着也会写进 buffer，之后打开就能看到。
+function M.append_panel(lines)
+    append_lines(lines)
 end
 
 --- 清空面板和诊断（日志文件本身不动）。

@@ -30,6 +30,24 @@ function M.check()
 
     if util.IS_WINDOWS then
         h.ok("Windows：窗口标题校验、焦点守卫、优雅关闭都可用")
+
+        --------------------------------------------------------
+        -- 控制台中间层：决定游戏输出会不会写进 Nvim 的画面。
+        --------------------------------------------------------
+
+        if config.console_wrapper == false then
+            h.warn(
+                "console_wrapper = false：Godot 会 AttachConsole 到 Nvim 的终端，游戏输出会污染画面",
+                "重新打开 console_wrapper 可以根治（见 README「终端残影」）"
+            )
+        elseif config.keep_alive ~= true then
+            h.warn(
+                "keep_alive = false：控制台中间层用不了（job object 里的进程会继承控制台），游戏输出会污染画面",
+                "把 keep_alive 设为 true 才能根治；或者把 Godot 放到另一个终端里跑"
+            )
+        else
+            h.ok("控制台中间层已启用（Godot 的父进程是无控制台的 cmd.exe）")
+        end
     else
         h.warn(
             "非 Windows：窗口标题校验、焦点守卫、优雅关闭（godot-close.ps1）不可用",
@@ -149,6 +167,20 @@ function M.check()
 
             if info.injected then
                 h.ok("addon 已注入：" .. tostring(info.addon))
+
+                -- 语法校验：插件静默加载失败时完全没输出，是最难查的一种坏法
+                local bstatus, bdetail = require("godot-instance.bridge").validate(info.root)
+
+                if bstatus == "ok" then
+                    h.ok("addon 语法校验通过（godot --check-only）")
+                elseif bstatus == "no_godot" then
+                    h.warn("没找到 Godot 可执行文件，跳过了 addon 语法校验")
+                else
+                    h.error(
+                        "addon 语法校验失败（" .. tostring(bstatus) .. "）：编辑器会静默加载失败，一条报错都抓不到",
+                        tostring(bdetail)
+                    )
+                end
             else
                 h.warn(
                     "addon 还没注入：" .. tostring(info.addon),
@@ -171,6 +203,23 @@ function M.check()
                 h.warn(
                     "桥日志还不存在：" .. tostring(info.path),
                     "Godot 只在启动时加载编辑器插件 —— 第一次注入后需要重启一次编辑器"
+                )
+            end
+
+            --------------------------------------------------------
+            -- 把「哪些编辑器报错会发过来」讲清楚。
+            --
+            -- 默认不发编辑器侧的 GDScript 报错（和 LSP 诊断重复），不知情的
+            -- 话很容易以为是插件坏了。
+            --------------------------------------------------------
+
+            if config.bridge and config.bridge.script_errors == true then
+                h.info("编辑器侧 GDScript 报错：会转发（bridge.script_errors = true）")
+            else
+                h.info(
+                    "编辑器侧 GDScript 报错：不转发（默认，和 gdscript LSP 诊断重复）",
+                    "游戏运行以后的脚本报错不受影响，走 godot.log 那条路",
+                    "想全都要就设 bridge.script_errors = true"
                 )
             end
 

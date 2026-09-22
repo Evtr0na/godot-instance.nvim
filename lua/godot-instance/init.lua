@@ -221,7 +221,7 @@ function M.bootstrap(opts)
         local result = bridge.sync()
         local info = bridge.info()
 
-        notify(table.concat({
+        local lines = {
             "godot-instance.nvim 编辑器报错桥",
             "",
             "项目      : " .. tostring(info.root or result.root or "-"),
@@ -230,10 +230,24 @@ function M.bootstrap(opts)
             "启用插件  : " .. tostring(result.enable or "-"),
             "桥日志    : " .. tostring(info.path or "-") .. (info.exists and "（存在）" or "（还没有）"),
             "已收报错  : " .. tostring(info.count) .. " 条",
-            "",
-            "Godot 只在启动时加载编辑器插件：第一次注入后要重启一次编辑器",
-            "（或在 Godot 里「项目 -> 重新加载当前项目」）。",
-        }, "\n"))
+        }
+
+        if result.inject == "invalid_addon" then
+            lines[#lines + 1] = ""
+            lines[#lines + 1] = "⚠ 注入的插件有语法错误，Godot 会静默加载失败（一条报错都抓不到）："
+            lines[#lines + 1] = tostring(result.detail)
+        elseif result.enable == "updated" then
+            lines[#lines + 1] = ""
+            lines[#lines + 1] = "⚠ 刚把插件补回 project.godot 的启用列表。"
+            lines[#lines + 1] = "  Godot 在「首次导入项目」或「插件加载失败」时会删掉这一项，"
+            lines[#lines + 1] = "  所以现在需要重启一次编辑器让它生效。"
+        else
+            lines[#lines + 1] = ""
+            lines[#lines + 1] = "Godot 只在启动时加载编辑器插件：注入后要重启一次编辑器"
+            lines[#lines + 1] = "（或在 Godot 里「项目 -> 重新加载当前项目」）。"
+        end
+
+        notify(table.concat(lines, "\n"))
     end, {
         desc = "Sync and show the Godot editor error bridge status",
     })
